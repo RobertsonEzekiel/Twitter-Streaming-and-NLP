@@ -31,11 +31,11 @@ public class TestTwitterStream6 {
 	// We only want so many tweets to be read.
 	static int countTweets = 0;
 	static int topicTrigger = 0;
-	static int MAXTWEETS = 10000;
+	static int MAXTWEETS = 100000;
 	// Set all tokens to lower case to reduce vocabulary size. 
 	final static boolean lowercase = true;
 	// Full file path to the model used by the POS tagger.
-	final static String MODELNAME = "C:\\Users\\User\\workspace\\StreamingWk3\\src\\model.20120919.txt";
+	final static String MODELNAME = "C:\\Users\\User\\Documents\\Zeke\\model.20120919.txt";
 	// Tags for POS to be removed. See arc-tweet-nlp-0.3.2\docs\annot_guidelines.md
 	// for the meanings of each tag.
 	final static List<String> REMOVE = Arrays.asList(",","@","U","E","G","~");
@@ -43,6 +43,8 @@ public class TestTwitterStream6 {
 	static long initialTime = System.currentTimeMillis();
 	// List of stopwords from Stanford NLP
 	static List<String> stopwords = new ArrayList<String>();
+	// While copying over json objects, use this to disable tweet intake.
+	static boolean enabled = true;
 	
 	public static void main(String[] args) throws TwitterException, IOException{
 		// Set maximum tweets from command line
@@ -88,8 +90,9 @@ public class TestTwitterStream6 {
 		//FileOutputStream topicFOS = new FileOutputStream(topicFile);
 		//OutputStreamWriter topicOSW = new OutputStreamWriter(topicFOS);
 		// Load the file of stopwords.
-		Stream<String> stream = Files.lines(Paths.get("C:\\Users\\User\\Documents\\Zeke\\StanfordNlpStopwords.txt"));
-		stopwords = stream.collect(Collectors.toList());
+		Stream<String> stopStream = Files.lines(Paths.get("C:\\Users\\User\\Documents\\Zeke\\StanfordNlpStopwords.txt"));
+		stopwords = stopStream.collect(Collectors.toList());
+		stopStream.close();
 		
 		//Load and initialize the POS tagger. Part of Tagger.java.
 		Tagger tagger = new Tagger();
@@ -99,7 +102,7 @@ public class TestTwitterStream6 {
 		int numTopics = 100;
 		double alphaSum = (double)numTopics * 0.001;
 		double beta = 0.01;
-		MalletLDA lda = new MalletLDA(numTopics, alphaSum, beta);
+
 		
 		// List of cleaned up tweet strings to be passed to the Mallet pipes
 		// for instancing.
@@ -109,6 +112,7 @@ public class TestTwitterStream6 {
 		// ArrayList of JSON objects, for storing the data in the order it is
 		// received while the LDA is finding topics to assign to each tweet.
 		ArrayList<JSONObject> jsonStorage = new ArrayList<JSONObject>();
+		ArrayList<JSONObject> jsonTemp = new ArrayList<JSONObject>();
 		
 		// Stream, and print statuses from given location to stdout. Nothing is 
 		// stored, so there should be no memory problems I think.
@@ -118,6 +122,9 @@ public class TestTwitterStream6 {
 			@Override
 			public void onStatus(Status status) {
 				try {
+					if (!enabled) {
+						return;
+					}
 					// Debug
 					//System.out.println(status.getLang());
 					
@@ -179,12 +186,20 @@ public class TestTwitterStream6 {
 					topicTrigger++;
 					//if (((topicTrigger >= 10000) || (System.currentTimeMillis() 
 					//		- initialTime > 300000)) && !lda.estimatorRunning) {
-					if ((topicTrigger >= 10000) && !lda.estimatorRunning) {
+					if (topicTrigger >= 10000) {
+						// Pause the intake so we have time to copy over the
+						// jsons to a temporary file, and clean out the buffer.
+						enabled = false;
+						jsonTemp.addAll(jsonStorage);
+						jsonStorage.clear();
+						// Reset triggers for the topic modeler;
 						topicTrigger = 0;
 						initialTime = System.currentTimeMillis();
-						System.out.println("~~~~~~RUN THE TOPIC MODELER~~~~~~");
 						String[] cleanArray = new String[cleanList.size()];
 						cleanArray = cleanList.toArray(cleanArray);
+						enabled = true;
+						System.out.println("~~~~~~RUN THE TOPIC MODELER~~~~~~");
+						
 						/*for (int index = 0; index < cleanList.size(); index++) {
 							System.out.println(cleanArray[index]);
 							System.out.println(cleanList.get(index));
@@ -198,6 +213,7 @@ public class TestTwitterStream6 {
 							// Clear out these lists for later.
 							statusIds.clear();
 							cleanList.clear();
+							MalletLDA lda = new MalletLDA(numTopics, alphaSum, beta);
 							lda.addInstances(instances);
 							// MalletLDA.java is multithreaded, so use as many
 							// as the computer has available to it.
@@ -208,19 +224,17 @@ public class TestTwitterStream6 {
 							lda.printTopWord(topicFile);
 							ArrayList<String> topicArray = lda.getTopicArray();
 							// Assign topics to each tweet stored in JSON ArrayList.
-							int index = 0;
-							for (JSONObject jType: jsonStorage) {
-								jType.put("topic", topicArray.get(index));
-								index++;
+							int jj = 0;
+							for (JSONObject jType: jsonTemp) {
+								jType.put("topic", topicArray.get(jj));
+								jsonOSW.write(jType.toString() + "\n");
+								jj++;
 							}
 						}
 						catch (Exception e) {
 							e.printStackTrace();
 						}
-						// Print out the json ojbect that will be sent to visualization.
-						for (JSONObject jType: jsonStorage) {
-							jsonOSW.write(jType.toString() + "\n");
-						}
+						
 					}
 					// Automatic shut-off after MAXTWEETS have been processed.
 					if (countTweets >= MAXTWEETS) {
@@ -235,10 +249,9 @@ public class TestTwitterStream6 {
 						jsonOSW.close();
 						jsonFOS.close();
 						// DEBUG: Check if command line arguments are working.
-						for (int index = 0; index < args.length; index++) {
-							System.out.println(args[index]);
+						for (int ii = 0; ii < args.length; ii++) {
+							System.out.println(args[ii]);
 						}
-						stream.close();
 						System.exit(0);
 					}
 					// Reset the tagger.
@@ -275,7 +288,6 @@ public class TestTwitterStream6 {
 			@Override
 			public void onException(Exception ex) {
 				ex.printStackTrace();
-				stream.close();
 				System.exit(1);
 			}
 		};
@@ -287,13 +299,12 @@ public class TestTwitterStream6 {
 		//double[][] YorkBoston = {{-74.0, 40.0}, {-70.6, 42.6}};
 		//double[][] newYork = {{-74.0, 40.0}, {-73.0, 41.0}};
 		//double[][] NEUSA = {{-77.8, 36.6}, {-70.0, 43.7}};
+		//double[][] theWorld = {{-180, -90}, {180, 90}};
 		double[][] northAmerica = {{-169, 13}, {-51, 90}};
 		// Only retrieve tweets from the given location. 
 		FilterQuery filter = new FilterQuery();
 		filter.locations(northAmerica);
-		// Cannot use the filter alone; this tries to load too much and Twitter
-		// cuts the stream off.
-		// ts.sample();
+		// Apply the filter and run the stream!
 		ts.filter(filter);
 		
 	}

@@ -229,10 +229,14 @@ public class MalletLDA implements Serializable{
 				while ((currentTypeTopicCounts[index] > 0) && (currentTopic != 
 						topic)) {
 					index++;
+					try {
 					if (index == currentTypeTopicCounts.length) {
 						logger.info("overflow on type " + type);
 					}
 					currentTopic = currentTypeTopicCounts[index] & topicMask;
+					} catch (Exception e) {
+						continue;
+					}
 				}
 				currentValue = currentTypeTopicCounts[index] >> topicBits;
 		
