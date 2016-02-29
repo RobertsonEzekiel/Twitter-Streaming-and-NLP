@@ -1,6 +1,6 @@
 /*
- * TestTwitterStream6.java
- * 8/2/2016
+ * TestTwitterStream8.java
+ * 24/2/2016
  * Ezekiel Robertson
  * 
  * Set up a basic Twitter stream using Twitter4j. The goal for now is to connect
@@ -26,12 +26,15 @@ import java.util.stream.Stream;
 import org.json.simple.JSONObject;
 import cc.mallet.types.InstanceList;
 
-public class TestTwitterStream6 {
+public class TestTwitterStream8 {
 	// Flags for options, consolidated up here.
+	// #CareerArc is cluttering up the data. Remove it?
+	final static boolean CAREERARC = true; 
 	// We only want so many tweets to be read.
 	static int countTweets = 0;
 	static int topicTrigger = 0;
-	static int MAXTWEETS = 100000;
+	static int Interval = 10000;
+	static int MAXTWEETS = Interval * 2;
 	// Set all tokens to lower case to reduce vocabulary size. 
 	final static boolean lowercase = true;
 	// Full file path to the model used by the POS tagger.
@@ -45,6 +48,7 @@ public class TestTwitterStream6 {
 	static List<String> stopwords = new ArrayList<String>();
 	// While copying over json objects, use this to disable tweet intake.
 	static boolean enabled = true;
+	static ArrayList<JSONObject> jsonTemp = new ArrayList<JSONObject>();
 	
 	public static void main(String[] args) throws TwitterException, IOException{
 		// Set maximum tweets from command line
@@ -62,6 +66,7 @@ public class TestTwitterStream6 {
 		cb.setOAuthAccessToken("4805189297-SmHEh2MaoKsElGOgEnjKJr7IpV6cPRBZHDEHBEp");
 		cb.setOAuthAccessTokenSecret("gZXMZ6DG2vMwOQeJSWXJvbJkcWmruxWbDoJ9Cutnd3qx2");
 		cb.setPrettyDebugEnabled(true);
+		cb.setHttpRetryCount(5);
 		// Build the file to store tweet data for the lda.
 		/*
 		File textfile = new File("C:\\Users\\User\\test_olda\\input\\20151003.text");
@@ -77,11 +82,11 @@ public class TestTwitterStream6 {
 		FileOutputStream timefos = new FileOutputStream(timefile);
 		OutputStreamWriter timeosw = new OutputStreamWriter(timefos);
 		*/
-		File topicFile = new File("C:\\Users\\User\\test_olda\\test11022016.txt");
+		File topicFile = new File("C:\\Users\\User\\test_olda\\test26022016.txt");
 		if (!topicFile.exists()) {
 			topicFile.createNewFile();
 		}
-		File jsonFile = new File("C:\\Users\\User\\test_olda\\json11022016.txt");
+		File jsonFile = new File("C:\\Users\\User\\test_olda\\json26022016.txt");
 		if (!jsonFile.exists()) {
 			jsonFile.createNewFile();
 		}
@@ -112,19 +117,18 @@ public class TestTwitterStream6 {
 		// ArrayList of JSON objects, for storing the data in the order it is
 		// received while the LDA is finding topics to assign to each tweet.
 		ArrayList<JSONObject> jsonStorage = new ArrayList<JSONObject>();
-		ArrayList<JSONObject> jsonTemp = new ArrayList<JSONObject>();
 		
-		// Stream, and print statuses from given location to stdout. Nothing is 
-		// stored, so there should be no memory problems I think.
+		
+		// Stream and process tweets, storing 10000 at a time as strings/JSON
+		// for topic modeling.
 		StatusListener listener = new StatusListener() {
 			// Everything is going well, print the twitter message, and the name
 			// of whoever sent it.
 			@Override
 			public void onStatus(Status status) {
 				try {
-					if (!enabled) {
-						return;
-					}
+					if (!enabled || (CAREERARC && status.getText().contains("#CareerArc"))) {
+					
 					// Debug
 					//System.out.println(status.getLang());
 					
@@ -132,8 +136,7 @@ public class TestTwitterStream6 {
 					// Also, we cannot check language and location at the same
 					// time, the location search is an inclusive OR with other
 					// arguments.
-					if ((status.getGeoLocation() != null) && (status.getLang().equals("en"))) {
-					// JSON object to write to a database for visualization.
+					if ((status.getGeoLocation() != null) && (status.getLang().equals("en"))) {					// JSON object to write to a database for visualization.
 					JSONObject json = new JSONObject();
 					// Print out a list of tokens received in the tweet's text.
 					String text = status.getText();
@@ -186,7 +189,7 @@ public class TestTwitterStream6 {
 					topicTrigger++;
 					//if (((topicTrigger >= 10000) || (System.currentTimeMillis() 
 					//		- initialTime > 300000)) && !lda.estimatorRunning) {
-					if (topicTrigger >= 10000) {
+					if (topicTrigger >= Interval) {
 						// Pause the intake so we have time to copy over the
 						// jsons to a temporary file, and clean out the buffer.
 						enabled = false;
@@ -224,17 +227,24 @@ public class TestTwitterStream6 {
 							lda.printTopWord(topicFile);
 							ArrayList<String> topicArray = lda.getTopicArray();
 							// Assign topics to each tweet stored in JSON ArrayList.
+							System.out.println("Topic Array Size: " + topicArray.size());
+							System.out.println("JSON Array Size: " + jsonTemp.size());
 							int jj = 0;
 							for (JSONObject jType: jsonTemp) {
-								jType.put("topic", topicArray.get(jj));
-								jsonOSW.write(jType.toString() + "\n");
-								jj++;
+								if (jType.containsKey("topic")) {
+									continue;
+								}
+								else {
+									jType.put("topic", topicArray.get(jj));
+									jsonOSW.write(jType.toString() + "\n");
+									jj++;
+								}
 							}
 						}
 						catch (Exception e) {
 							e.printStackTrace();
 						}
-						
+						jsonTemp.subList(0, jsonTemp.size() - (int)Math.round(Interval * .4)).clear();
 					}
 					// Automatic shut-off after MAXTWEETS have been processed.
 					if (countTweets >= MAXTWEETS) {
@@ -257,6 +267,7 @@ public class TestTwitterStream6 {
 					// Reset the tagger.
 					taggedTokens = null;
 					}
+				}
 				} catch (Exception ex){
 					ex.printStackTrace();
 				}
@@ -304,6 +315,7 @@ public class TestTwitterStream6 {
 		// Only retrieve tweets from the given location. 
 		FilterQuery filter = new FilterQuery();
 		filter.locations(northAmerica);
+		//filter.language(new String[]{"en"});
 		// Apply the filter and run the stream!
 		ts.filter(filter);
 		
