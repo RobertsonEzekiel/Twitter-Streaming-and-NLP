@@ -33,8 +33,12 @@ public class TestTwitterStream8 {
 	// We only want so many tweets to be read.
 	static int countTweets = 0;
 	static int topicTrigger = 0;
+<<<<<<< HEAD:src/TestTwitterStream8.java
 	static int Interval = 10000;
 	static int MAXTWEETS = Interval * 2;
+=======
+	static int MAXTWEETS = 50000;
+>>>>>>> origin/master:src/TestTwitterStream6.java
 	// Set all tokens to lower case to reduce vocabulary size. 
 	final static boolean lowercase = true;
 	// Full file path to the model used by the POS tagger.
