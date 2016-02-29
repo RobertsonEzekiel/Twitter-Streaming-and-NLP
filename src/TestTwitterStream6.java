@@ -31,7 +31,7 @@ public class TestTwitterStream6 {
 	// We only want so many tweets to be read.
 	static int countTweets = 0;
 	static int topicTrigger = 0;
-	static int MAXTWEETS = 100000;
+	static int MAXTWEETS = 50000;
 	// Set all tokens to lower case to reduce vocabulary size. 
 	final static boolean lowercase = true;
 	// Full file path to the model used by the POS tagger.
