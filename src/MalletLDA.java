@@ -53,6 +53,8 @@ public class MalletLDA implements Serializable{
 	public double alphaSum;
 	public double beta;
 	public double betaSum;
+	public double c;
+	public int oldNumTypes = -1;
 	public boolean usingSymmetricAlpha = false;
 	public static final double DEFAULT_BETA = 0.01;
 	public int[][] typeTopicCounts;
@@ -86,14 +88,15 @@ public class MalletLDA implements Serializable{
 		return ret;
 	}
 	
-	public MalletLDA (int numberOfTopics, double alphaSum, double beta) {
-		this (newLabelAlphabet(numberOfTopics), alphaSum, beta);
+	public MalletLDA (int numberOfTopics, double alphaSum, double beta, double c) {
+		this (newLabelAlphabet(numberOfTopics), alphaSum, beta, c);
 	}
 	
-	public MalletLDA (LabelAlphabet topicAlphabet, double alphaSum, double beta) {
+	public MalletLDA (LabelAlphabet topicAlphabet, double alphaSum, double beta, double c) {
 		this.data = new ArrayList<TopicAssignment>();
 		this.topicAlphabet = topicAlphabet;
 		this.numTopics = topicAlphabet.size();
+		this.c = c;
 		
 		// Set topicBits as an exact power of 2
 		if (Integer.bitCount(numTopics) == 2) {
@@ -283,13 +286,18 @@ public class MalletLDA implements Serializable{
 		}
 		logger.info("max tokens: " + maxTokens);
 		logger.info("total tokens: " + totalTokens);
+		// Calculate beta based on the equation from "Online Trend Analysis With
+		// Topic Models, section 3.2.
+		if (oldNumTypes > 0) {
+			beta = beta*(1-c) + numTopics * totalTokens * beta * c / oldNumTypes;
+		}
 		
 		docLengthCounts = new int[maxTokens + 1];
 		topicDocCounts = new int[numTopics][maxTokens + 1];
 	}
 	
 	public void optimizeAlpha(WorkerRunnable[] runnables) {
-		// First clear out the sufficient statisic histograms
+		// First clear out the sufficient statistic histograms
 		Arrays.fill(docLengthCounts, 0);
 		for (int topic = 0; topic < topicDocCounts.length; topic++) {
 			Arrays.fill(topicDocCounts[topic], 0);
@@ -882,5 +890,19 @@ public class MalletLDA implements Serializable{
 			topicArray.add((String)alphabet.lookupObject(info.getID()));
 		}
 		return topicArray;
+	}
+	
+	// Getter methods for alphaSum, beta, numTypes
+	public double getAlphaSum() {
+		return alphaSum;
+	}
+	public double getBeta() {
+		return beta;
+	}
+	public int getNumTypes() {
+		return numTypes;
+	}
+	public void setOldNumTypes(int old) {
+		oldNumTypes = old;
 	}
 }
