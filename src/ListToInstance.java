@@ -8,10 +8,16 @@ import cc.mallet.pipe.iterator.*;
 public class ListToInstance {
 	Pipe pipe;
 	ArrayList<Long> name_id;
+	Alphabet alphabet;
 	
-	public ListToInstance(ArrayList<Long> ids) {
+	public ListToInstance(ArrayList<Long> ids, Alphabet ABC) {
 		name_id = ids;
 		pipe = buildPipe();
+		alphabet = ABC;
+		//Debug
+		if (alphabet != null) {
+			System.out.println("Alphabet size: " + alphabet.size());
+		}
 	}
 	
 	public Pipe buildPipe() {
@@ -23,8 +29,9 @@ public class ListToInstance {
 		pipeList.add(new TokenSequence2FeatureSequence());
 		//pipeList.add(new FeatureSequence2FeatureVector());
 		//pipeList.add(new PrintInputAndTarget());
-		
-		return new SerialPipes(pipeList);
+		SerialPipes serialPipeList = new SerialPipes(pipeList);
+		serialPipeList.setDataAlphabet(alphabet);
+		return serialPipeList;
 	}
 	
 	public InstanceList readArray(String[] cleanTexts) {

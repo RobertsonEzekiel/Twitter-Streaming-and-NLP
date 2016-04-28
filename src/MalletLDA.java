@@ -26,13 +26,14 @@ import cc.mallet.types.LabelAlphabet;
 import cc.mallet.types.InstanceList;
 import cc.mallet.types.Instance;
 import cc.mallet.types.LabelSequence;
-import cc.mallet.types.Dirichlet;
+//import cc.mallet.types.Dirichlet;
 import cc.mallet.types.IDSorter;
 import cc.mallet.types.FeatureSequence;
 //import cc.mallet.types.FeatureVector;
 import cc.mallet.topics.TopicAssignment;
 import cc.mallet.util.Randoms;
 import cc.mallet.util.MalletLogger;
+import cc.mallet.util.Maths;
 
 //import gnu.trove.*;
 
@@ -49,18 +50,27 @@ public class MalletLDA implements Serializable{
 	public int topicBits;
 	public int numTypes;
 	public int totalTokens;
-	public double[] alpha;
+	public double alpha0;
+	public double[][] alpha;
 	public double alphaSum;
-	public double beta;
+	public double beta0;
+	public double[][] beta;
 	public double betaSum;
+	public int[][] prevTypeTopicCounts;
+	//public int[][] threadCounts;
 	public double c;
 	public int oldNumTypes = -1;
+	public int oldNumDocs = -1;
+	public int oldTokens = -1;
+	public int newTypes;
+	public int[][] alphaCounts;
+	public int[][] prevAlphaCounts;
 	public boolean usingSymmetricAlpha = false;
 	public static final double DEFAULT_BETA = 0.01;
 	public int[][] typeTopicCounts;
 	public int[] tokensPerTopic;
 	public int[] docLengthCounts;
-	public int[][] topicDocCounts;
+	public double[][] topicDocCountsHere;
 	public int numIterations = 1000;
 	public int burninPeriod = 200;
 	public int saveSampleInterval = 10;
@@ -88,15 +98,18 @@ public class MalletLDA implements Serializable{
 		return ret;
 	}
 	
-	public MalletLDA (int numberOfTopics, double alphaSum, double beta, double c) {
-		this (newLabelAlphabet(numberOfTopics), alphaSum, beta, c);
+	public MalletLDA (int numberOfTopics, double alphaSum, double beta, double c, int oldNumTypes, int oldNumDocs) {
+		this (newLabelAlphabet(numberOfTopics), alphaSum, beta, c, oldNumTypes, oldNumDocs);
 	}
 	
-	public MalletLDA (LabelAlphabet topicAlphabet, double alphaSum, double beta, double c) {
+	public MalletLDA (LabelAlphabet topicAlphabet, double alpha0, double beta0,
+				double c, int oldNumTypes, int oldNumDocs) {
 		this.data = new ArrayList<TopicAssignment>();
 		this.topicAlphabet = topicAlphabet;
 		this.numTopics = topicAlphabet.size();
 		this.c = c;
+		this.oldNumTypes = oldNumTypes;
+		this.oldNumDocs = oldNumDocs;
 		
 		// Set topicBits as an exact power of 2
 		if (Integer.bitCount(numTopics) == 2) {
@@ -110,10 +123,15 @@ public class MalletLDA implements Serializable{
 			topicBits = Integer.bitCount(topicMask);
 		}
 		
-		this.alphaSum = alphaSum;
-		this.alpha = new double[numTopics];
-		Arrays.fill(alpha, alphaSum / numTopics);
-		this.beta = beta;
+		
+		
+		this.alpha0 = alpha0;
+		this.beta0 = beta0;
+		
+		if (oldNumTypes > 0) {
+			this.prevTypeTopicCounts = new int[oldNumTypes][numTopics];
+			this.prevAlphaCounts = new int[oldNumDocs][numTopics];
+		}
 		
 		tokensPerTopic = new int[numTopics];
 		
@@ -128,9 +146,37 @@ public class MalletLDA implements Serializable{
 	// addInstances is the part which loads a new corpus file as an InstanceList
 	// into the LDA, preparing it for topic modeling.
 	public void addInstances (InstanceList training) {
-		alphabet = training.getDataAlphabet();
+		
+		int oldAlphabet = 0;
+		if (oldNumTypes > 0) {
+			
+			oldAlphabet = alphabet.size();
+			Alphabet tempAlphabet;
+			tempAlphabet = training.getDataAlphabet();
+			newTypes = tempAlphabet.size();
+			System.out.println(newTypes);
+			alphabet.lookupIndices(training.getDataAlphabet().toArray(), true);
+		} else {
+			alphabet = training.getDataAlphabet();
+			newTypes = alphabet.size();
+		}
+		//DEBUG
+		System.out.println("New alphabet size: "+alphabet.size());
 		numTypes = alphabet.size();
-		betaSum = beta * numTypes;
+		
+		if (oldNumTypes > 0) {
+			if (numTypes > oldAlphabet) {
+				System.out.println("Our vocabulary is expanding!");
+			}
+			
+		}
+		alphaCounts = new int[training.size()][numTopics];
+		topicDocCountsHere = new double[numTopics][training.size()];
+		
+		
+		//DEBUG
+		//System.out.println("Is beta 0? " + beta[0][0]);
+		
 		typeTopicCounts = new int[numTypes][];
 		typeTotals = new int[numTypes];
 		
@@ -167,6 +213,7 @@ public class MalletLDA implements Serializable{
 			int[] topics = topicSequence.getFeatures();
 			// Randomize the topics' starting words
 			for (int position = 0; position < topics.length; position++) {
+				
 				int topic = random.nextInt(numTopics);
 				topics[position] = topic;
 			}
@@ -188,7 +235,9 @@ public class MalletLDA implements Serializable{
 		// first 0 entry.
 		for (int type = 0; type < numTypes; type++) {
 			int[] topicCounts = typeTopicCounts[type];
-			
+			if (topicCounts.length == 0) {
+				continue;
+			}
 			int position = 0;
 			while ((position < typeTopicCounts.length) && 
 					(topicCounts[position]> 0)) {
@@ -196,6 +245,8 @@ public class MalletLDA implements Serializable{
 				position++;
 			}
 		}
+		
+		int doc = 0;
 		
 		for (TopicAssignment document : data) {
 			FeatureSequence tokens = (FeatureSequence)document.instance.getData();
@@ -208,8 +259,9 @@ public class MalletLDA implements Serializable{
 				if (topic == UNASSIGNED_TOPIC) {
 					continue;
 				}
-				
 				tokensPerTopic[topic]++;
+				alphaCounts[doc][topic]++;
+				topicDocCountsHere[topic][doc]++;
 				
 				// The format for these arrays is: The topic in the rightmost
 				// bits; the count in the remaining (left) bits. Since the count
@@ -265,6 +317,7 @@ public class MalletLDA implements Serializable{
 					}
 				}
 			}
+			doc++;
 		}
 	}
 	
@@ -286,16 +339,115 @@ public class MalletLDA implements Serializable{
 		}
 		logger.info("max tokens: " + maxTokens);
 		logger.info("total tokens: " + totalTokens);
-		// Calculate beta based on the equation from "Online Trend Analysis With
-		// Topic Models, section 3.2.
-		if (oldNumTypes > 0) {
-			beta = beta*(1-c) + numTopics * totalTokens * beta * c / oldNumTypes;
-		}
 		
 		docLengthCounts = new int[maxTokens + 1];
-		topicDocCounts = new int[numTopics][maxTokens + 1];
+		topicDocCountsHere = new double[numTopics][data.size()];
+		// Calculate alpha, beta based on the equation from "Online Trend Analysis With
+		// Topic Models, section 3.2.
+		//TODO bookmark this
+		alpha = new double[data.size()][numTopics];
+		for (double[] row : alpha) {
+			Arrays.fill(row, alpha0);
+		}
+		beta = new double[numTopics][numTypes];
+		for (double[] row : beta) {
+			Arrays.fill(row, beta0);
+		}
+		//System.out.println("Beta Size: " + beta.length + " x " + beta[0].length);
+		//System.out.println("Alpha Size: " + alpha.length + " x " + alpha[0].length);
+		
+		if (oldNumTypes > 0) {
+			//DEBUG
+			//System.err.println(prevTypeTopicCounts.length +", "+ 
+			//		prevTypeTopicCounts[0].length);
+			//System.out.println("TTC Size: " + prevTypeTopicCounts.length + " x " + prevTypeTopicCounts[0].length);
+			//System.out.println("AC Size: " + prevAlphaCounts.length + " x " + prevAlphaCounts[0].length);
+			int oldTokensB = 0;
+			for (int w = 0; w < prevTypeTopicCounts.length; w++) {
+				for (int t = 0; t < prevTypeTopicCounts[w].length; t++) {
+					oldTokensB += prevTypeTopicCounts[w][t];
+				}
+			}
+			for (int type = 0; (type < prevTypeTopicCounts.length && type < numTypes); type++) {
+				//for (int t = 0; (t < prevTypeTopicCounts[w].length && t < numTopics); t++) {
+				
+				int[] topicCounts = prevTypeTopicCounts[type];
+				
+				int index = 0;
+				while ((index < topicCounts.length) && (topicCounts[index] > 0)) {
+					int topic = topicCounts[index] & topicMask;
+					int count = topicCounts[index] >> topicBits;
+					if (count > 0) {
+						beta[topic][type] = beta0*(1.0-c) + (double)count * (double)numTopics
+								* (double)newTypes * beta0 * c / (double)oldTokensB;
+					}
+					
+					//DEBUG
+					//System.out.println(beta[topic][type]);
+										
+					index++;
+				}
+						
+					//}
+				//System.out.println();
+				//DEBUG
+				//System.out.println(beta[t][w]);
+			}
+			try{ 
+				TimeUnit.MILLISECONDS.sleep(2000);
+			} catch (InterruptedException e) {
+			
+			}
+			int oldTokensA = 0;
+			for (int w = 0; w < prevAlphaCounts.length; w++) {
+				for (int t = 0; t < prevAlphaCounts[w].length; t++) {
+					oldTokensA += prevAlphaCounts[w][t];
+				}
+			}
+			for (int d = 0; d < prevAlphaCounts.length && d < data.size(); d++) {
+				for (int t = 0; (t < prevAlphaCounts[d].length && t < numTopics); t++) {
+					if (prevAlphaCounts[d][t] > 0) {
+						alpha[d][t] = (double)prevAlphaCounts[d][t] * (double)numTopics
+								* (double)oldNumDocs * alpha0 / (double)oldTokensA;
+						
+						//alpha[d][t] *= (double)numTopics;
+						//System.out.print(prevAlphaCounts[d][t] + " ");
+						//System.out.print(alpha[d][t]);
+					}
+					//DEBUG
+					if (alpha[d][t] < 0) {
+						System.out.println("Alpha < 0, " + alpha[d][t]);
+					}
+				}
+				//System.out.println();
+			}
+		}
+		alphaSum = 0;
+		for (double[] a : alpha) {
+			for (double b : a) {
+				alphaSum += b;
+			}
+		}
+		
+		alphaSum /= data.size();
+		System.out.println("alphaSum: " + alphaSum);
+		betaSum = 0;
+		for (double[] i : beta) {
+			for (double j : i) {
+				betaSum += j;
+			}
+		}
+		betaSum /= numTopics;
+		/*
+		if (oldNumDocs > 0) {
+			betaSum /= newTypes;
+		} else {
+			betaSum /= numTypes;
+		}
+		*/
+		System.out.println("betaSum: " + betaSum);
 	}
-	
+	/*
 	public void optimizeAlpha(WorkerRunnable[] runnables) {
 		// First clear out the sufficient statistic histograms
 		Arrays.fill(docLengthCounts, 0);
@@ -407,7 +559,7 @@ public class MalletLDA implements Serializable{
 			runnables[thread].resetBeta(beta, betaSum);
 		}
 	}
-	
+	*/
 	// Estimate is where the main loops for working through the lda algorithm
 	// happen. Gets called from main(), and will require several more methods
 	// to function.
@@ -448,9 +600,9 @@ public class MalletLDA implements Serializable{
 				}
 				// Engage threads
 				runnables[thread] = new WorkerRunnable(numTopics, alpha, 
-						alphaSum, beta, random, data, runnableCounts, 
+						alphaSum, beta, betaSum, newTypes, oldNumDocs, random, data, runnableCounts, 
 						runnableTotals, offset, docsPerThread);
-				runnables[thread].initializeAlphaStatistics(docLengthCounts.length);
+				runnables[thread].initializeAlphaStatistics(docsPerThread);
 				offset += docsPerThread;
 			}
 		}
@@ -468,7 +620,7 @@ public class MalletLDA implements Serializable{
 			}
 			
 			runnables[0] = new WorkerRunnable(numTopics, alpha, 
-					alphaSum, beta, random, data, typeTopicCounts, 
+					alphaSum, beta, betaSum, newTypes, oldNumDocs, random, data, typeTopicCounts, 
 					tokensPerTopic, offset, docsPerThread);
 			runnables[0].initializeAlphaStatistics(docLengthCounts.length);
 			
@@ -582,7 +734,7 @@ public class MalletLDA implements Serializable{
 				logger.fine((elapsedMillis / 1000) + "s ");
 			}
 			// Run the optimizer for alpha and beta every so often
-			
+			/*
 			if ((iteration > burninPeriod) && (optimizeInterval != 0) &&
 					(iteration % optimizeInterval == 0)) {
 				optimizeAlpha(runnables);
@@ -590,6 +742,7 @@ public class MalletLDA implements Serializable{
 				logger.fine("[O " + (System.currentTimeMillis() - 
 						iterationStart) + "] ");
 			}
+			*/
 			/*
 			if (iteration % 10 == 0) {
 				if (printLogLikelihood) {
@@ -699,6 +852,11 @@ public class MalletLDA implements Serializable{
 	public void sumTypeTopicCounts (WorkerRunnable[] runnables) {
 		// Clear topic totals
 		Arrays.fill(tokensPerTopic, 0);
+		
+		for (int doc = 0; doc < data.size(); doc++) {
+			Arrays.fill(alphaCounts[doc], 0);
+		}
+		
 		// Clear the type/topic counts, only looking at the entries before the
 		// first 0 entry.
 		for (int type = 0; type < numTypes; type++) {
@@ -718,6 +876,25 @@ public class MalletLDA implements Serializable{
 			int[] sourceTotals = runnables[thread].getTokensPerTopic();
 			for (int topic = 0; topic < numTopics; topic++) {
 				tokensPerTopic[topic] += sourceTotals[topic];
+			}
+			//DEBUG
+			//System.out.println("StartDoc: " + runnables[thread].startDoc);
+			//System.out.println("NumDocs: " + runnables[thread].numDocs);
+			//threadCounts = new int[numTopics][runnables[thread].numDocs];
+			//threadCounts = runnables[thread].getTopicDocCounts();
+			int[][] threadCounts = runnables[thread].getTopicDocCounts();
+			//System.out.println(threadCounts[0][0]);
+			for (int topic = 0; topic < numTopics; topic++) {
+				for (int doc = 0;
+					 	doc < data.size() && doc < runnables[thread].numDocs; doc++) {
+					//System.out.println("Local size: " + topicDocCounts[topic].length
+					//		+ ", Worker size: " + runnables[thread].topicDocCounts[topic].length);
+					//System.out.println(runnables[thread].topicDocCounts[topic][doc]);
+					topicDocCountsHere[topic][doc + runnables[thread].startDoc] += 
+							threadCounts[topic][doc];
+					alphaCounts[doc][topic] += threadCounts[topic][doc];
+					//System.out.println(topicDocCountsHere[topic][doc]);
+				}
 			}
 			
 			// Now handle the individual type topic counts
@@ -840,7 +1017,7 @@ public class MalletLDA implements Serializable{
 			}
 			// Normalize and sort the topics
 			for (int topic = 0; topic < numTopics; topic++) {
-				sortedTopics[topic].set(topic, (alpha[topic] + topicCounts[topic])
+				sortedTopics[topic].set(topic, (alpha[doc][topic] + topicCounts[topic])
 						/ (docLen + alphaSum));
 			}
 			Arrays.sort(sortedTopics);
@@ -855,7 +1032,7 @@ public class MalletLDA implements Serializable{
 	
 	// Returns array of topics, sorted in the same order as their corresponding
 	// documents, as in printTopWord.
-	public ArrayList<String> getTopicArray() {
+	public ArrayList<String> getTopicArray(int numWords) {
 		ArrayList<String> topicArray = new ArrayList<String>();
 		
 		ArrayList<TreeSet<IDSorter>> topicSortedWords = getSortedWords();
@@ -879,24 +1056,214 @@ public class MalletLDA implements Serializable{
 			}
 			// Normalize and sort the topics
 			for (int topic = 0; topic < numTopics; topic++) {
-				sortedTopics[topic].set(topic, (alpha[topic] + topicCounts[topic])
+				sortedTopics[topic].set(topic, (alpha[doc][topic] + topicCounts[topic])
 						/ (docLen + alphaSum));
 			}
 			Arrays.sort(sortedTopics);
 			TreeSet<IDSorter> sortedWords = topicSortedWords.get(sortedTopics[0].getID());
 			// This feels like a mess
 			Iterator<IDSorter> iterator = sortedWords.iterator();
-			IDSorter info = iterator.next();
-			topicArray.add((String)alphabet.lookupObject(info.getID()));
+			StringBuilder out  = new StringBuilder();
+			int word = 0;
+			while (iterator.hasNext() && word < numWords) {
+				IDSorter info = iterator.next();
+				out.append(alphabet.lookupObject(info.getID()) + " ");
+				word++;
+			}
+			
+			topicArray.add(out.toString());
 		}
 		return topicArray;
 	}
+	
+	// Print out each topic, and the top documents for that topic.
+	public void printTopicDocuments (File file, int topicSize, String[] tweets) throws IOException {
+		PrintWriter out = new PrintWriter (new FileWriter (file));
+		//int docLen;
+		//int[] topicCounts = new int[numTopics];
+		ArrayList<TreeSet<IDSorter>> topicSortedWords = getSortedWords();
+		IDSorter[] sortedTopics = new IDSorter[numTopics];
+		
+		
+		
+		for (int topic = 0; topic < numTopics; topic++) {
+			// Initialize the sorters with dummy values.
+			sortedTopics[topic] = new IDSorter(topic, topic);
+			for (int doc = 0; doc < data.size(); doc++) {
+				topicDocCountsHere[topic][doc] += alpha[doc][topic];
+			}
+		}
+		
+		for (int topic = 0; topic < numTopics; topic++) {
+			StringBuilder builder = new StringBuilder();
+			builder.append(topic);
+			builder.append("\t");
+			
+			TreeSet<IDSorter> sortedWords = topicSortedWords.get(topic);
+			// This feels like a mess
+			Iterator<IDSorter> iterator = sortedWords.iterator();
+			
+			int word = 0;
+			while (iterator.hasNext() && word < topicSize) {
+				IDSorter info = iterator.next();
+				builder.append(alphabet.lookupObject(info.getID()) + " ");
+				word++;
+			}
+			builder.append("\n");
+			
+			int docsForThisTopic = topicDocCountsHere[topic].length;
+			int[] indexes = new int[docsForThisTopic];
+			for (int i = 0; i < docsForThisTopic; i++) {
+				indexes[i] = i;
+			}
+			
+			
+			
+			
+			// Sort the documents in descending order of relevance.
+			int temp = 0;
+			for (int j = 0; j < docsForThisTopic; j++) {
+				for (int k = 1; k < (docsForThisTopic - j); k++) {
+					//DEBUG
+					//System.out.println(topicDocCounts[topic][k]);
+					if (topicDocCountsHere[topic][k-1] < topicDocCountsHere[topic][k]) {
+						temp = indexes[k-1];
+						indexes[k-1] = indexes[k];
+						indexes[k] = temp;
+					}
+				}
+			}
+			//DEBUG
+			/*
+			for (int ee = 0; ee < indexes.length; ee++) {
+				System.out.print(indexes[ee]);
+			}
+			System.out.println();
+			*/
+			// Print out top 10 tweets for this topic
+			for (int doc = 0; doc < 10; doc++) {
+				builder.append("\t");
+				builder.append(tweets[indexes[doc]]);
+				builder.append("\n");
+				//System.out.print(indexes[doc] + " ");
+			}
+			//System.out.println();
+			out.print(builder);
+		}
+		
+		out.close();
+	}
+	
+	// Return the Jensen-Shannon Divergence for each of the topics.
+	public double[] topicJSD() {
+		double[] JSDArray = new double[numTopics];
+		int[][] prevArray = new int[numTopics][prevTypeTopicCounts.length];
+		int[][] currentArray = new int[numTopics][prevTypeTopicCounts.length];
+		int[] currentSums = new int[numTopics];
+		int[] prevSums = new int[numTopics];
+		
+		
+		for (int type = 0; type < prevTypeTopicCounts.length; type++) {
+			int[] currentCounts = typeTopicCounts[type];
+			int index = 0;
+			while ((index < currentCounts.length) && 
+					currentCounts[index] > 0) {
+				int topic = currentCounts[index] & topicMask;
+				int count = currentCounts[index] >> topicBits;
+				currentArray[topic][type] = count;
+				currentSums[topic] += count;
+				index++;
+			}
+			int[] prevCounts = prevTypeTopicCounts[type];
+			index = 0;
+			while ((index < prevCounts.length) && 
+					prevCounts[index] > 0) {
+				int topic = prevCounts[index] & topicMask;
+				int count = prevCounts[index] >> topicBits;
+				prevArray[topic][type] = count;
+				prevSums[topic] += count;
+				index++;
+			}
+		}
+			
+		for (int topic = 0; topic < numTopics; topic++) {	
+			
+			// Normalize
+			double[] prevNormal = new double[prevTypeTopicCounts.length];
+			double[] currentNormal = new double[prevTypeTopicCounts.length];
+			//DEBUG
+			//System.out.println(prevSum + ", " + currentSum);
+			for (int type = 0; type < prevArray.length; type++) {
+				prevNormal[type] = (double)prevArray[topic][type] / (double)prevSums[topic];
+				currentNormal[type] = (double)currentArray[topic][type] / (double)currentSums[topic];
+			}
+			
+			JSDArray[topic] = Maths.jensenShannonDivergence(prevNormal, currentNormal);
+		}
+		
+		return JSDArray;
+	}
+	
+	// Calculate topic coherence
+	/*
+	public double calcAssoc(int word1, int word2) {
+		double result;
+		String combined1 = new String(word1 + "|" + word2);
+		String combined2 = new String(word2 + "|" + word1);
+		int combinedCount = 0, w1Count = 0, w2Count = 0;
+		
+		if (wordCount.containsKey(combined1)) {
+			combinedCount = wordCount.get(combined1);
+		} else if (wordCount.containsKey(combined2)) {
+			combinedCount = wordCount.get(combined2);
+		}
+		
+		if (wordCount.containsKey(word1)) {
+			w1Count = wordCount.get(word1);
+		}
+		if (wordCount.containsKey(word2)) {
+			w2Count = wordCount.get(word2);
+		}
+		
+		if (w1Count == 0 || w2Count == 0 || combinedCount == 0) {
+			result = 0.0;
+		} else {
+			result = Math.log10((combinedCount * windowTotal) / (w1Count * w2Count));
+			result = result / (-1.0 * Math.log10(combinedCount / windowTotal));
+		}
+		
+		return result;
+	}
+	*/
+	
+	/*
+	public double calcTopicCoherence (String[] topicWords) {
+		ArrayList<Double> topicAssoc = new ArrayList<Double>();
+		double topicAssocSum = 0.0;
+		
+		for (int w1id = 0; w1id < topicWords.length - 1; w1id++) {
+			String targetWord = topicWords[w1id];
+			String w1 = " " + targetWord.split(collcSep);
+			
+			for (int w2id = w1id + 1; w2id < topicWords.length; w2id++) {
+				String topicWord = topicWords[w2id];
+				String w2 = " " + topicWord.split(collcSep);
+				
+				if (targetWord != topicWord) {
+					topicAssoc.add(calcAssoc(w1, w2));
+				}
+			}
+		}
+		
+		return topicAssocSum / topicAssoc.size();
+	}
+	*/
 	
 	// Getter methods for alphaSum, beta, numTypes
 	public double getAlphaSum() {
 		return alphaSum;
 	}
-	public double getBeta() {
+	public double[][] getBeta() {
 		return beta;
 	}
 	public int getNumTypes() {
@@ -904,5 +1271,84 @@ public class MalletLDA implements Serializable{
 	}
 	public void setOldNumTypes(int old) {
 		oldNumTypes = old;
+	}
+	public int getNumDocs() {
+		return data.size();
+	}
+	public void setOldNumDocs(int docs) {
+		oldNumDocs = docs;
+	}
+	public int getNumTopics() {
+		return numTopics;
+	}
+	public int getNumTokens() {
+		return totalTokens;
+	}
+	public void setOldTokens(int tokens) {
+		oldTokens = tokens;
+	}
+	public int[][] getAlphaCounts() {
+		int[][] array = new int[alphaCounts.length][];
+		for (int i = 0; i < alphaCounts.length; i++) {
+			array[i] = Arrays.copyOf(alphaCounts[i], alphaCounts[i].length);
+			//for (int j = 0; j < alphaCounts[i].length; j++) {
+			//	array[i][j] = alphaCounts[i][j];
+			//}
+		}
+		return array;
+	}
+	
+	public void setPrevAlphaCounts(int[][] counts) {
+		prevAlphaCounts = new int[counts.length][];
+		for (int i = 0; i < counts.length; i++) {
+			prevAlphaCounts[i] = Arrays.copyOf(counts[i], counts[i].length);
+			//for (int j = 0; j < counts[i].length; j++) {
+			//	this.prevAlphaCounts[i][j] = counts[i][j];
+			//}
+		}
+	}
+	public int[][] getTypeTopicCounts() {
+		int[][] array = new int[typeTopicCounts.length][];
+		for (int i = 0; i < typeTopicCounts.length; i++) {
+			array[i] = Arrays.copyOf(typeTopicCounts[i], typeTopicCounts[i].length);
+		}
+		return array;
+	}
+	public void setPrevTypeTopicCounts(int[][] counts) {
+		prevTypeTopicCounts = new int[counts.length][];
+		for (int i = 0; i < counts.length; i++) {
+			prevTypeTopicCounts[i] = Arrays.copyOf(counts[i], counts[i].length);
+			//for (int j = 0; j < counts[i].length; j++) {
+			//	this.prevTypeTopicCounts[i][j] = counts[i][j];
+			//}
+		}
+	}
+	public Alphabet getAlphabet() {
+		return alphabet;
+	}
+	public void setAlphabet(Alphabet al) {
+		alphabet = new Alphabet();
+		alphabet = al;
+	}
+	
+	//TODO
+	// Drop the previous instances from the list, keeping everything else in position.
+	// Same for the alphabet/vocabulary.
+	public void dropInstances(int numDropped) {
+		for (TopicAssignment document : data) {
+			FeatureSequence tokens = (FeatureSequence)document.instance.getData();
+			LabelSequence topicSequence = (LabelSequence)document.topicSequence;
+			int[] topics = topicSequence.getFeatures();
+			
+			for (int position = 0; position < tokens.size(); position++) {
+				int topic = topics[position];
+				int type = tokens.getIndexAtPosition(position);
+				typeTopicCounts[type][topic]--;
+				
+			}
+		}
+		
+		data.subList(0, data.size() - numDropped).clear();
+		
 	}
 }

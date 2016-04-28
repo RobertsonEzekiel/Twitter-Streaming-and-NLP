@@ -7,6 +7,8 @@
 
 import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.Collections;
+import org.apache.commons.lang.ArrayUtils;
 
 //import java.util.zip.*;
 
@@ -31,6 +33,7 @@ public class WorkerRunnable implements Runnable {
 
 	ArrayList<TopicAssignment> data;
 	int startDoc, numDocs;
+	int[][] docStorageArray;
 
 	protected int numTopics; // Number of topics to be fit
 
@@ -41,10 +44,12 @@ public class WorkerRunnable implements Runnable {
 
 	protected int numTypes;
 
-	protected double[] alpha;	 // Dirichlet(alpha,alpha,...) is the distribution over topics
+	protected double[][] alpha;	 // Dirichlet(alpha,alpha,...) is the distribution over topics
 	protected double alphaSum;
-	protected double beta;   // Prior on per-topic multinomial distribution over words
+	protected double[][] beta;   // Prior on per-topic multinomial distribution over words
 	protected double betaSum;
+	protected double[] betaAvg;
+	protected double[] alphaAvg;
 	public static final double DEFAULT_BETA = 0.01;
 	
 	protected double smoothingOnlyMass = 0.0;
@@ -55,16 +60,17 @@ public class WorkerRunnable implements Runnable {
 
 	// for dirichlet estimation
 	protected int[] docLengthCounts; // histogram of document sizes
-	protected int[][] topicDocCounts; // histogram of document/topic counts, indexed by <topic index, sequence position index>
+	public int[][] topicDocCounts; // histogram of document/topic counts, indexed by <topic index, sequence position index>
 
-	boolean shouldSaveState = false;
+	boolean shouldSaveState = true;
 	boolean shouldBuildLocalCounts = true;
 	
 	protected Randoms random;
 	
 	public WorkerRunnable (int numTopics,
-						   double[] alpha, double alphaSum,
-						   double beta, Randoms random,
+						   double[][] alpha, double alphaSum,
+						   double[][] beta, double betaSum, int newTypes, int oldDocs, 
+						   Randoms random,
 						   ArrayList<TopicAssignment> data,
 						   int[][] typeTopicCounts, 
 						   int[] tokensPerTopic,
@@ -91,14 +97,39 @@ public class WorkerRunnable implements Runnable {
 		
 		this.alphaSum = alphaSum;
 		this.alpha = alpha;
+		this.betaSum = betaSum;
 		this.beta = beta;
-		this.betaSum = beta * numTypes;
+		//DEBUG
+		//System.out.println("Is beta 0? " + beta[0][0]);
+		//this.betaSum = 0;
+		this.betaAvg = new double[numTopics];
+		int topic = 0;
+		for (double[] i : beta) {
+			for (double j : i) {
+				this.betaAvg[topic] += j;
+		//		this.betaSum += j; 
+			}
+			this.betaAvg[topic] /= i.length;
+			topic++;
+		}
+		
+		this.alphaAvg = new double[numTopics];
+		for (topic = 0; topic < numTopics; topic++) {
+			for (int doc = startDoc; doc < data.size() && doc < startDoc + numDocs; doc++) {
+				alphaAvg[topic] += alpha[doc][topic];
+			}
+			this.betaAvg[topic] /= numDocs;
+		}
+		
+		
 		this.random = random;
 		
 		this.startDoc = startDoc;
 		this.numDocs = numDocs;
 
 		cachedCoefficients = new double[ numTopics ];
+		this.topicDocCounts = new int[numTopics][numDocs];
+		this.docStorageArray = new int[numTopics][numDocs];
 
 		//System.err.println("WorkerRunnable Thread: " + numTopics + " topics, " + topicBits + " topic bits, " + 
 		//				   Integer.toBinaryString(topicMask) + " topic mask");
@@ -119,20 +150,30 @@ public class WorkerRunnable implements Runnable {
 	public int[][] getTypeTopicCounts() { return typeTopicCounts; }
 
 	public int[] getDocLengthCounts() { return docLengthCounts; }
-	public int[][] getTopicDocCounts() { return topicDocCounts; }
+	public int[][] getTopicDocCounts() {
+		int[][] array = new int[topicDocCounts.length][];
+		//DEBUG
+		//System.out.println(topicDocCounts.length + ", " + topicDocCounts[0].length);
+		for (int i = 0; i < topicDocCounts.length; i++) {
+			array[i] = Arrays.copyOf(topicDocCounts[i], topicDocCounts[i].length);
+			//System.out.println(array[i][0] + ", " + topicDocCounts[i][0] + ", " 
+			//		+ docStorageArray[i][0]);
+		}
+		return array;
+	}
 	
 	public boolean getIsFinished() { return isFinished; }
 
 	public void initializeAlphaStatistics(int size) {
 		docLengthCounts = new int[size];
-		topicDocCounts = new int[numTopics][size];
+		
 	}
 	
 	public void collectAlphaStatistics() {
 		shouldSaveState = true;
 	}
 
-	public void resetBeta(double beta, double betaSum) {
+	public void resetBeta(double[][] beta, double betaSum) {
 		this.beta = beta;
 		this.betaSum = betaSum;
 	}
@@ -254,10 +295,10 @@ public class WorkerRunnable implements Runnable {
 			// Initialize the cached coefficients, using only smoothing.
 			//  These values will be selectively replaced in documents with
 			//  non-zero counts in particular topics.
-			
+			//TODO find type index for beta, alpha
 			for (int topic=0; topic < numTopics; topic++) {
-				smoothingOnlyMass += alpha[topic] * beta / (tokensPerTopic[topic] + betaSum);
-				cachedCoefficients[topic] =  alpha[topic] / (tokensPerTopic[topic] + betaSum);
+				smoothingOnlyMass += alphaAvg[topic] * betaAvg[topic] / (tokensPerTopic[topic] + betaSum);
+				cachedCoefficients[topic] =  alphaAvg[topic] / (tokensPerTopic[topic] + betaSum);
 			}
 			
 			for (int doc = startDoc;
@@ -275,7 +316,7 @@ public class WorkerRunnable implements Runnable {
 				LabelSequence topicSequence =
 					(LabelSequence) data.get(doc).topicSequence;
 				
-				sampleTopicsForOneDoc (tokenSequence, topicSequence,
+				sampleTopicsForOneDoc (tokenSequence, topicSequence, doc,
 									   true);
 			}
 			
@@ -292,12 +333,12 @@ public class WorkerRunnable implements Runnable {
 		}
 	}
 	
-	protected void sampleTopicsForOneDoc (FeatureSequence tokenSequence,
+	public void sampleTopicsForOneDoc (FeatureSequence tokenSequence,
 										  LabelSequence topicSequence,
+										  int currentDoc,
 										  boolean readjustTopicsAndStats /* currently ignored */) {
 
 		int[] oneDocTopics = topicSequence.getFeatures();
-
 		int[] currentTypeTopicCounts;
 		int type, oldTopic, newTopic;
 //		double topicWeightsSum;
@@ -336,12 +377,15 @@ public class WorkerRunnable implements Runnable {
 			int n = localTopicCounts[topic];
 
 			//	initialize the normalization constant for the (B * n_{t|d}) term
-			topicBetaMass += beta * n /	(tokensPerTopic[topic] + betaSum);	
-
+			//TODO find type index for beta
+			topicBetaMass += betaAvg[topic] * n / (tokensPerTopic[topic] + betaSum);
+			
 			//	update the coefficients for the non-zero topics
-			cachedCoefficients[topic] =	(alpha[topic] + n) / (tokensPerTopic[topic] + betaSum);
+			cachedCoefficients[topic] =	(alpha[currentDoc][topic] + n) / (tokensPerTopic[topic] + betaSum);
+			//DEBUG
+			//System.out.println(topicBetaMass);
 		}
-
+		
 		double topicTermMass = 0.0;
 
 		double[] topicTermScores = new double[numTopics];
@@ -362,9 +406,9 @@ public class WorkerRunnable implements Runnable {
 				
 				// Remove this topic's contribution to the 
 				//  normalizing constants
-				smoothingOnlyMass -= alpha[oldTopic] * beta / 
+				smoothingOnlyMass -= alpha[currentDoc][oldTopic] * beta[oldTopic][type] / 
 					(tokensPerTopic[oldTopic] + betaSum);
-				topicBetaMass -= beta * localTopicCounts[oldTopic] /
+				topicBetaMass -= beta[oldTopic][type] * localTopicCounts[oldTopic] /
 					(tokensPerTopic[oldTopic] + betaSum);
 				
 				// Decrement the local doc/topic counts
@@ -401,18 +445,24 @@ public class WorkerRunnable implements Runnable {
 				// Decrement the global topic count totals
 				tokensPerTopic[oldTopic]--;
 				assert(tokensPerTopic[oldTopic] >= 0) : "old Topic " + oldTopic + " below 0";
-			
+				
+				//DEBUG
+				/*
+				if (topicBetaMass < 0 && localTopicCounts[oldTopic] == 0) {
+					System.out.println("KNOCK, KNOCK");
+				}
+				*/
 
 				// Add the old topic's contribution back into the
 				//  normalizing constants.
-				smoothingOnlyMass += alpha[oldTopic] * beta / 
+				smoothingOnlyMass += alpha[currentDoc][oldTopic] * beta[oldTopic][type] / 
 					(tokensPerTopic[oldTopic] + betaSum);
-				topicBetaMass += beta * localTopicCounts[oldTopic] /
+				topicBetaMass += beta[oldTopic][type] * localTopicCounts[oldTopic] /
 					(tokensPerTopic[oldTopic] + betaSum);
 
 				// Reset the cached coefficient for this topic
 				cachedCoefficients[oldTopic] = 
-					(alpha[oldTopic] + localTopicCounts[oldTopic]) /
+					(alpha[currentDoc][oldTopic] + localTopicCounts[oldTopic]) /
 					(tokensPerTopic[oldTopic] + betaSum);
 			}
 
@@ -429,10 +479,17 @@ public class WorkerRunnable implements Runnable {
 			topicTermMass = 0.0;
 
 			while (index < currentTypeTopicCounts.length && 
-				   currentTypeTopicCounts[index] > 0) {
+					   currentTypeTopicCounts[index] > 0) {
 				currentTopic = currentTypeTopicCounts[index] & topicMask;
 				currentValue = currentTypeTopicCounts[index] >> topicBits;
-
+				
+				// TODO: bad stuff here to get around error.
+				
+				if (currentTopic >= numTopics) {
+					currentTopic = random.nextInt(numTopics);
+				}
+				
+				
 				if (! alreadyDecremented && 
 					currentTopic == oldTopic) {
 
@@ -459,13 +516,15 @@ public class WorkerRunnable implements Runnable {
 						int temp = currentTypeTopicCounts[subIndex];
 						currentTypeTopicCounts[subIndex] = currentTypeTopicCounts[subIndex + 1];
 						currentTypeTopicCounts[subIndex + 1] = temp;
-						
+							
 						subIndex++;
 					}
 
 					alreadyDecremented = true;
 				}
 				else {
+					//DEBUG
+					//System.out.println(cachedCoefficients.length+" : "+currentTopic);
 					score = 
 						cachedCoefficients[currentTopic] * currentValue;
 					topicTermMass += score;
@@ -475,13 +534,26 @@ public class WorkerRunnable implements Runnable {
 				}
 			}
 			
-			double sample = random.nextUniform() * (smoothingOnlyMass + topicBetaMass + topicTermMass);
+			double sample = random.nextUniform() * Math.abs(smoothingOnlyMass + topicBetaMass + topicTermMass);
+			// DEBUG
+			//System.out.println(sample+", "+smoothingOnlyMass+", "+topicBetaMass+", "+topicTermMass);
+			
+			if (sample < 0) {
+				System.err.println("Sample: " + sample);
+				System.err.println("SOM: " + smoothingOnlyMass + ", TBM: " + 
+						topicBetaMass + ", TTM: " + topicTermMass);
+				System.exit(0);
+			}
+			
 			double origSample = sample;
 
 			//	Make sure it actually gets set
 			newTopic = -1;
+			// FIND THE F****** ERROR
+			int EXTERMINATOR = 0;
 
 			if (sample < topicTermMass) {
+				EXTERMINATOR = 1;
 				//topicTermCount++;
 
 				i = -1;
@@ -489,7 +561,7 @@ public class WorkerRunnable implements Runnable {
 					i++;
 					sample -= topicTermScores[i];
 				}
-
+				
 				newTopic = currentTypeTopicCounts[i] & topicMask;
 				currentValue = currentTypeTopicCounts[i] >> topicBits;
 				
@@ -509,15 +581,24 @@ public class WorkerRunnable implements Runnable {
 			}
 			else {
 				sample -= topicTermMass;
-
+				//DEBUG
+				/*
+				if (sample > origSample) {
+					System.out.println("Sample > origSample, s > TTM");
+				}
+				*/
+				// This is a problem section
 				if (sample < topicBetaMass) {
+					EXTERMINATOR = 2;
 					//betaTopicCount++;
-
-					sample /= beta;
+					sample /= beta[oldTopic][type];
 
 					for (denseIndex = 0; denseIndex < nonZeroTopics; denseIndex++) {
+						
 						int topic = localTopicIndex[denseIndex];
-
+						// New addition, hopelfully this fixes stuff;
+						newTopic = topic;
+						
 						sample -= localTopicCounts[topic] /
 							(tokensPerTopic[topic] + betaSum);
 
@@ -528,20 +609,31 @@ public class WorkerRunnable implements Runnable {
 					}
 
 				}
+				// End of problem section
 				else {
+					EXTERMINATOR = 3;
+					//DEBUG
+					/*
+					if (sample > origSample) {
+						System.out.println("Sample > origSample, s > TBM");
+					}
+					*/
 					//smoothingOnlyCount++;
 
 					sample -= topicBetaMass;
-
-					sample /= beta;
+					
+					sample /= beta[oldTopic][type];
 
 					newTopic = 0;
-					sample -= alpha[newTopic] /
+					sample -= alpha[currentDoc][newTopic] /
 						(tokensPerTopic[newTopic] + betaSum);
-
-					while (sample > 0.0) {
+					
+					
+					while (sample > 0.0 && newTopic < numTopics - 1) {
+						// DEBUG
+						//System.err.println(sample);
 						newTopic++;
-						sample -= alpha[newTopic] / 
+						sample -= alpha[currentDoc][newTopic] / 
 							(tokensPerTopic[newTopic] + betaSum);
 					}
 					
@@ -593,9 +685,11 @@ public class WorkerRunnable implements Runnable {
 			}
 
 			if (newTopic == -1) {
-				System.err.println("WorkerRunnable sampling error: "+ origSample + " " + sample + " " + smoothingOnlyMass + " " + 
-						topicBetaMass + " " + topicTermMass);
+				System.err.println("WorkerRunnable sampling error: "+ origSample
+						+ " " + sample + " " + smoothingOnlyMass + " " + 
+						topicBetaMass + " " + topicTermMass + " " + EXTERMINATOR);
 				newTopic = numTopics-1; // TODO is this appropriate
+				// No it is not. Everything is terrible.
 				//throw new IllegalStateException ("WorkerRunnable: New topic not sampled.");
 			}
 			//assert(newTopic != -1);
@@ -603,9 +697,9 @@ public class WorkerRunnable implements Runnable {
 			//			Put that new topic into the counts
 			oneDocTopics[position] = newTopic;
 
-			smoothingOnlyMass -= alpha[newTopic] * beta / 
+			smoothingOnlyMass -= alpha[currentDoc][newTopic] * beta[newTopic][type] / 
 				(tokensPerTopic[newTopic] + betaSum);
-			topicBetaMass -= beta * localTopicCounts[newTopic] /
+			topicBetaMass -= beta[newTopic][type] * localTopicCounts[newTopic] /
 				(tokensPerTopic[newTopic] + betaSum);
 
 			localTopicCounts[newTopic]++;
@@ -638,12 +732,12 @@ public class WorkerRunnable implements Runnable {
 
 			//	update the coefficients for the non-zero topics
 			cachedCoefficients[newTopic] =
-				(alpha[newTopic] + localTopicCounts[newTopic]) /
+				(alpha[currentDoc][newTopic] + localTopicCounts[newTopic]) /
 				(tokensPerTopic[newTopic] + betaSum);
 
-			smoothingOnlyMass += alpha[newTopic] * beta / 
+			smoothingOnlyMass += alpha[currentDoc][newTopic] * beta[newTopic][type] / 
 				(tokensPerTopic[newTopic] + betaSum);
-			topicBetaMass += beta * localTopicCounts[newTopic] /
+			topicBetaMass += beta[newTopic][type] * localTopicCounts[newTopic] /
 				(tokensPerTopic[newTopic] + betaSum);
 
 		}
@@ -656,7 +750,11 @@ public class WorkerRunnable implements Runnable {
 			for (denseIndex = 0; denseIndex < nonZeroTopics; denseIndex++) {
 				int topic = localTopicIndex[denseIndex];
 				
-				topicDocCounts[topic][ localTopicCounts[topic] ]++;
+				topicDocCounts[topic][currentDoc - startDoc]++;
+				//docStorageArray[topic][currentDoc - startDoc] = 
+				//		topicDocCounts[topic][currentDoc - startDoc];
+				//DEBUG
+				//System.out.println(topicDocCounts[topic][ localTopicCounts[topic] ]);
 			}
 		}
 
@@ -667,7 +765,7 @@ public class WorkerRunnable implements Runnable {
 			int topic = localTopicIndex[denseIndex];
 
 			cachedCoefficients[topic] =
-				alpha[topic] / (tokensPerTopic[topic] + betaSum);
+				alpha[currentDoc][topic] / (tokensPerTopic[topic] + betaSum);
 		}
 
 	}
